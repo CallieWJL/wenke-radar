@@ -1,6 +1,8 @@
 name: 即将截止岗位推送
 
 on:
+  schedule:
+    - cron: '0 13 * * *'  # 北京时间每天 21:00
   workflow_dispatch:
     inputs:
       days:
@@ -54,7 +56,7 @@ jobs:
       - name: 筛选并推送即将截止岗位
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
-          DAYS: ${{ inputs.days }}
+          DAYS: ${{ inputs.days || '7' }}
         run: |
           python - <<'PY'
           import os
