@@ -19,11 +19,12 @@ class _FakeResp:
         return self._payload
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def no_delay(monkeypatch):
     # 保证测试不发真实请求
     monkeypatch.setenv("PUSH_KEY", "")
     monkeypatch.setenv("WECOM_KEY", "")
+    monkeypatch.setenv("FEISHU_WEBHOOK", "")
 
 
 class TestServerchanMapping:
@@ -47,6 +48,45 @@ class TestServerchanMapping:
         assert not r.success and "network down" in r.error
 
 
+class TestFeishuMapping:
+    def test_success_card_contains_security_keyword(self, monkeypatch):
+        captured = {}
+
+        def fake_post(*args, **kwargs):
+            captured.update(kwargs)
+            return _FakeResp({"code": 0, "msg": "success"})
+
+        monkeypatch.setattr(push.requests, "post", fake_post)
+        r = push._push_feishu("https://example.test/hook", "飞书",
+                               "秋招雷达初始化完成", "今日简报")
+
+        body = captured["data"]
+        payload = __import__("json").loads(body.decode("utf-8"))
+        assert r.success and r.code == 0
+        assert "岗位" in payload["card"]["header"]["title"]["content"]
+        assert payload["card"]["elements"][0]["content"] == "今日简报"
+        assert captured["headers"]["Content-Type"].endswith("utf-8")
+
+    def test_legacy_success_response(self, monkeypatch):
+        monkeypatch.setattr(push.requests, "post", lambda *a, **k: _FakeResp(
+            {"StatusCode": 0, "StatusMessage": "success"}))
+        r = push._push_feishu("https://example.test/hook", "飞书", "t", "c")
+        assert r.success and r.code == 0
+
+    def test_failure(self, monkeypatch):
+        monkeypatch.setattr(push.requests, "post", lambda *a, **k: _FakeResp(
+            {"code": 19024, "msg": "Key Words Not Found"}))
+        r = push._push_feishu("https://example.test/hook", "飞书", "t", "c")
+        assert not r.success and r.code == 19024
+        assert "Key Words Not Found" in r.error
+
+    def test_utf8_content_is_safely_truncated(self):
+        text = "岗" * 100
+        result = push._truncate_utf8(text, 10)
+        assert result == "岗" * 3
+        assert len(result.encode("utf-8")) <= 10
+
+
 class TestSendBriefStructured:
     def test_multi_key_returns_per_channel(self, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "k1,k2")
@@ -62,6 +102,15 @@ class TestSendBriefStructured:
         monkeypatch.setenv("PUSH_KEY", "")
         monkeypatch.setenv("WECOM_KEY", "")
         assert push.send_brief("x") == []
+
+    def test_feishu_webhook_is_a_channel(self, monkeypatch):
+        monkeypatch.setenv("FEISHU_WEBHOOK", "https://example.test/hook")
+        monkeypatch.setattr(push.requests, "post", lambda *a, **k: _FakeResp(
+            {"code": 0, "msg": "success"}))
+        results = push.send_brief("hello", title="今日岗位")
+        assert len(results) == 1
+        assert results[0].channel == "飞书"
+        assert results[0].success
 
     def test_all_failed_detected(self, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "k1,k2")
