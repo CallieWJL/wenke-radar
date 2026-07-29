@@ -125,6 +125,7 @@ jobs:
         env:
           PUSH_KEY: ${{ secrets.PUSH_KEY }}
           WECOM_KEY: ${{ secrets.WECOM_KEY }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
         run: |
           # 补推：不抓取，把今天已入库的岗位按当前配置重新推一次（改配置后用）
           if [ "${{ inputs.repush }}" = "true" ]; then
