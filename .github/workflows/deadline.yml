@@ -8,7 +8,7 @@ on:
       days:
         description: '推送未来多少天内截止的岗位（含今天）'
         type: string
-        default: '7'
+        default: '2'
 
 permissions:
   contents: read
@@ -56,7 +56,7 @@ jobs:
       - name: 筛选并推送即将截止岗位
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
-          DAYS: ${{ inputs.days || '7' }}
+          DAYS: ${{ inputs.days || '2' }}
         run: |
           python - <<'PY'
           import os
