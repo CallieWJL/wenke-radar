@@ -1,0 +1,142 @@
+name: 即将截止岗位推送
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: '推送未来多少天内截止的岗位（含今天）'
+        type: string
+        default: '7'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  deadline-push:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Shanghai
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 恢复岗位数据库
+        uses: actions/cache/restore@v4
+        with:
+          path: data/jobs.db
+          key: jobs-db-deadline-${{ github.run_id }}
+          restore-keys: |
+            jobs-db-
+
+      - name: 快照兜底恢复
+        if: ${{ hashFiles('data/jobs.db') == '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p data
+          for id in $(gh run list --workflow daily.yml --limit 20 --json databaseId --jq '.[].databaseId'); do
+            if gh run download "$id" --name jobs-db-snapshot --dir data/ 2>/dev/null; then
+              echo "已从 run $id 恢复数据库快照"
+              break
+            fi
+          done
+          test -f data/jobs.db
+
+      - name: 筛选并推送即将截止岗位
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          DAYS: ${{ inputs.days }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import sqlite3
+          from collections import defaultdict
+          from datetime import date, timedelta
+
+          from domain.models import JobItem
+          from filters import filter_jobs
+          from push import send_brief
+
+          today = date.today()
+          days = max(0, min(int(os.environ.get("DAYS", "7")), 31))
+          end = today + timedelta(days=days)
+
+          def parse_deadline(tags):
+              match = re.search(r"(?:网申)?截止\s*(\d{1,2})[-/.月](\d{1,2})", tags or "")
+              if not match:
+                  return None
+              month, day = map(int, match.groups())
+              try:
+                  value = date(today.year, month, day)
+              except ValueError:
+                  return None
+              if value < today - timedelta(days=180):
+                  value = date(today.year + 1, month, day)
+              return value
+
+          conn = sqlite3.connect("data/jobs.db")
+          rows = conn.execute("""
+              SELECT company,job_id,title,category,location,url,publish_time,tags,
+                     recruit_type,source_id,source_kind,canonical_job_id,
+                     experience_min_years
+              FROM jobs
+          """).fetchall()
+          conn.close()
+
+          jobs = [JobItem(
+              company=r[0], job_id=r[1], title=r[2], category=r[3],
+              location=r[4], url=r[5], publish_time=r[6], tags=r[7],
+              recruit_type=r[8], source_id=r[9], source_kind=r[10],
+              canonical_job_id=r[11], experience_min_years=r[12],
+          ) for r in rows]
+
+          urgent = []
+          seen = set()
+          for job in filter_jobs(jobs):
+              deadline = parse_deadline(job.tags)
+              if deadline is None or not today <= deadline <= end:
+                  continue
+              key = (job.title, job.url)
+              if key in seen:
+                  continue
+              seen.add(key)
+              urgent.append((deadline, job))
+          urgent.sort(key=lambda item: (item[0], item[1].title))
+
+          grouped = defaultdict(list)
+          for deadline, job in urgent:
+              grouped[deadline].append(job)
+
+          lines = [
+              f"**岗位提醒：未来 {days} 天内截止**",
+              f"> 截止窗口：{today:%Y-%m-%d} 至 {end:%Y-%m-%d}｜共 **{len(urgent)}** 个｜已按当前方向、届别及“排除实习”规则筛选",
+          ]
+          for deadline in sorted(grouped):
+              left = (deadline - today).days
+              label = "今天截止" if left == 0 else f"剩 {left} 天"
+              lines.append(f"\n**{deadline:%m月%d日}截止｜{label}｜{len(grouped[deadline])} 个**")
+              for job in grouped[deadline]:
+                  title = job.title.replace("[", "［").replace("]", "］")
+                  location = job.location or "地点未注明"
+                  category = job.category or "方向未注明"
+                  lines.append(f"- [{title}]({job.url})")
+                  lines.append(f"  📍{location}｜{category}")
+          if not urgent:
+              lines.append("\n当前没有找到明确标注、且在此窗口内截止的对口岗位。")
+
+          content = "\n".join(lines)
+          print(f"岗位库 {len(jobs)} 个；对口且 {days} 天内截止 {len(urgent)} 个")
+          results = send_brief(content, title=f"{days}天内截止岗位提醒")
+          if not any(r.channel.startswith("飞书") and r.success for r in results):
+              raise SystemExit("飞书推送未成功")
+          PY
