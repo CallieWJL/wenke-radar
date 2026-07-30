@@ -2,7 +2,9 @@ name: 即将截止岗位推送
 
 on:
   schedule:
-    - cron: '0 13 * * *'  # 北京时间每天 21:00
+    - cron: '5 13 * * *'   # 北京时间 21:05 主触发
+    - cron: '22 13 * * *'  # 北京时间 21:22 备用触发
+    - cron: '37 13 * * *'  # 北京时间 21:37 备用触发
   workflow_dispatch:
     inputs:
       days:
@@ -14,8 +16,46 @@ permissions:
   contents: read
   actions: read
 
+concurrency:
+  group: deadline-push
+  cancel-in-progress: false
+
 jobs:
+  dedupe:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Shanghai
+    outputs:
+      should_run: ${{ steps.guard.outputs.should_run }}
+    steps:
+      - name: 当天去重守卫
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          today=$(date +%Y-%m-%d)
+          successful=$(gh run list \
+            --workflow deadline.yml \
+            --status success \
+            --limit 30 \
+            --json createdAt \
+            --jq "[.[] | select(.createdAt | startswith(\"${today}\"))] | length")
+
+          if [ "$successful" -gt 0 ]; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "今天已有成功的截止岗位推送，跳过本次备用触发"
+          else
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          fi
+
   deadline-push:
+    needs: dedupe
+    if: needs.dedupe.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     env:
       TZ: Asia/Shanghai
